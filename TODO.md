@@ -5,3 +5,4 @@ memo and list issues
 - flac tag
 - mp3 & aac
 - log files (or sqlite?)
+- player GUI ( or remake all?)
