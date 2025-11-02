@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dhowden/tag"
 	"github.com/faiface/beep"
 	"github.com/faiface/beep/flac"
 	"github.com/faiface/beep/speaker"
@@ -47,17 +48,19 @@ to quickly create a Cobra application.`,
 			fmt.Printf("Failed to read config file: %v\n", err)
 			return
 		}
-		playingSecond, err := cfg.Section("pomodoro").Key("playing_second").Int()
+		playback_timer := "playback_timer"
+		playingSecond, err := cfg.Section("pomodoro").Key(playback_timer).Int()
 		if err != nil {
-			fmt.Printf("Failed to parse 'playing_second' as an integer from config: %v\n", err)
+			fmt.Printf("Failed to parse '%s' as an integer from config: %v\n", playback_timer, err)
 			return
 		}
-		message("playing_second: %d", playingSecond)
+		message("playback_timer: %d", playingSecond)
 		dirPath := cfg.Section("path").Key("music_dir").String()
 		if dirPath == "" {
 			fmt.Println("'music_dir' not found in [path] section of config.ini")
 			return
 		}
+		message("music_dir: %q", dirPath)
 
 		// recursive file search
 		var files []string
@@ -87,16 +90,27 @@ to quickly create a Cobra application.`,
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Println("\nPlayback finished.")
+				message("Playback finished.")
 				break Loop
 			default:
-				f, selectedFile, err := selectAndOpenFile(files)
+				selectedFilePath, err := selectFile(files)
+				if err != nil {
+					fmt.Printf("error selecting file: %v\n", err)
+					continue
+				}
+
+				err = readTrackInfo(selectedFilePath)
 				if err != nil {
 					fmt.Printf("error opening file: %v\n", err)
 					continue
 				}
-
-				err = playFlac(ctx, f)
+				f, selectedFile, err := openFile(selectedFilePath)
+				if err != nil {
+					fmt.Printf("error opening file: %v\n", err)
+					continue
+				}
+				message("playing: %s", selectedFile)
+				err = playMusic(ctx, f)
 				f.Close()
 				if err != nil {
 					fmt.Printf("error playing file %s: %v\n", selectedFile, err)
@@ -129,15 +143,16 @@ func init() {
 
 func message(format string, a ...any) {
 	msg := fmt.Sprintf(format, a...)
-	fmt.Printf("[%s] %s\n", me, msg)
+	fmt.Printf("[%s♪] %s\n", me, msg)
 }
 
-func playFlac(ctx context.Context, f *os.File) error {
+func playMusic(ctx context.Context, f *os.File) error {
 	streamer, format, err := flac.Decode(f)
 	if err != nil {
 		return fmt.Errorf("failed to decode media: %w", err)
 	}
-	defer streamer.Close() // streamer must be closed to release resources
+	defer streamer.Close()
+
 	speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
 	done := make(chan bool)
 	speaker.Play(beep.Seq(streamer, beep.Callback(func() {
@@ -149,10 +164,11 @@ func playFlac(ctx context.Context, f *os.File) error {
 		// Playback finished successfully
 	case <-ctx.Done():
 		speaker.Clear()
-		fmt.Println("\nPlayback interrupted by timer.")
+		message("playback finished.")
 	}
 	return nil
 }
+
 func resolveMediaType(path string) (MediaType, bool) {
 	lowerPath := strings.ToLower(path)
 	// TODO can play flac only
@@ -162,17 +178,34 @@ func resolveMediaType(path string) (MediaType, bool) {
 	return Unknown, false
 }
 
-func selectAndOpenFile(files []string) (*os.File, string, error) {
+func selectFile(files []string) (string, error) {
 	if len(files) == 0 {
-		return nil, "", fmt.Errorf("no files to select from")
+		return "", fmt.Errorf("no files to select from")
 	}
 	randomIndex := rand.IntN(len(files))
 	selected := files[randomIndex]
-	fmt.Println(selected)
-
+	return selected, nil
+}
+func openFile(selected string) (*os.File, string, error) {
 	f, err := os.Open(selected)
 	if err != nil {
 		return nil, selected, fmt.Errorf("error opening file %s: %w", selected, err)
 	}
 	return f, selected, nil
+}
+
+func readTrackInfo(filePath string) error {
+	f, _, err := openFile(filePath)
+	if err != nil {
+		return fmt.Errorf("error opening file for tag reading: %w", err)
+	}
+	defer f.Close()
+
+	m, err := tag.ReadFrom(f)
+	if err != nil {
+		return nil
+	}
+
+	message("artist: %s, title: %s", m.Artist(), m.Title())
+	return nil
 }
