@@ -21,8 +21,8 @@ import (
 type MediaType int
 
 const (
-	Unknown MediaType = iota
-	Flac
+	TypeUnknown MediaType = iota
+	TypeFlac
 	// TODO
 	// Mp3
 	// Aac
@@ -43,24 +43,26 @@ to quickly create a Cobra application.`,
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
 	Run: func(cmd *cobra.Command, args []string) {
+		message("started at %s", time.Now().Format(time.RFC3339))
+
 		cfg, err := ini.Load("config.ini")
 		if err != nil {
 			fmt.Printf("Failed to read config file: %v\n", err)
 			return
 		}
-		playback_timer := "playback_timer"
-		playingSecond, err := cfg.Section("pomodoro").Key(playback_timer).Int()
+		playbackTimer := "playback_timer"
+		playingSecond, err := cfg.Section("pomodoro").Key(playbackTimer).Int()
 		if err != nil {
-			fmt.Printf("Failed to parse '%s' as an integer from config: %v\n", playback_timer, err)
+			fmt.Printf("Failed to parse '%s' as an integer from config: %v\n", playbackTimer, err)
 			return
 		}
-		message("playback_timer: %d", playingSecond)
+		message("playback_timer : %d", playingSecond)
 		dirPath := cfg.Section("path").Key("music_dir").String()
 		if dirPath == "" {
 			fmt.Println("'music_dir' not found in [path] section of config.ini")
 			return
 		}
-		message("music_dir: %q", dirPath)
+		message("music_dir : %q", dirPath)
 
 		// recursive file search
 		var files []string
@@ -83,40 +85,38 @@ to quickly create a Cobra application.`,
 			return
 		}
 
+		var speakerInitialized bool
+
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(playingSecond)*time.Second)
 		defer cancel()
 
-	Loop:
-		for {
-			select {
-			case <-ctx.Done():
-				message("Playback finished.")
-				break Loop
-			default:
-				selectedFilePath, err := selectFile(files)
-				if err != nil {
-					fmt.Printf("error selecting file: %v\n", err)
-					continue
-				}
+		// Loop until the context's timeout is reached.
+		for ctx.Err() == nil {
+			selectedFilePath, err := selectFile(files)
+			if err != nil {
+				fmt.Printf("error selecting file: %v\n", err)
+				continue
+			}
 
-				err = readTrackInfo(selectedFilePath)
-				if err != nil {
-					fmt.Printf("error opening file: %v\n", err)
-					continue
-				}
-				f, selectedFile, err := openFile(selectedFilePath)
-				if err != nil {
-					fmt.Printf("error opening file: %v\n", err)
-					continue
-				}
-				message("playing: %s", selectedFile)
-				err = playMusic(ctx, f)
-				f.Close()
-				if err != nil {
-					fmt.Printf("error playing file %s: %v\n", selectedFile, err)
-				}
+			trackInfo, err := readTrackInfo(selectedFilePath)
+			if err != nil {
+				fmt.Printf("error reading track info: %v\n", err)
+				continue
+			}
+			f, selectedFile, err := openFile(selectedFilePath)
+			if err != nil {
+				fmt.Printf("error opening file: %v\n", err)
+				continue
+			}
+
+			message("playing.. %s file:%q", trackInfo, selectedFile)
+			err = playTrack(ctx, f, &speakerInitialized)
+			f.Close() // Ensure file is closed after playing
+			if err != nil {
+				fmt.Printf("error playing file %s: %v\n", selectedFile, err)
 			}
 		}
+		message("done at %s", time.Now().Format(time.RFC3339))
 	},
 }
 
@@ -146,14 +146,17 @@ func message(format string, a ...any) {
 	fmt.Printf("[%s♪] %s\n", me, msg)
 }
 
-func playMusic(ctx context.Context, f *os.File) error {
+func playTrack(ctx context.Context, f *os.File, speakerInitialized *bool) error {
 	streamer, format, err := flac.Decode(f)
 	if err != nil {
 		return fmt.Errorf("failed to decode media: %w", err)
 	}
 	defer streamer.Close()
 
-	speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
+	if !*speakerInitialized {
+		speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
+		*speakerInitialized = true
+	}
 	done := make(chan bool)
 	speaker.Play(beep.Seq(streamer, beep.Callback(func() {
 		done <- true
@@ -164,7 +167,6 @@ func playMusic(ctx context.Context, f *os.File) error {
 		// Playback finished successfully
 	case <-ctx.Done():
 		speaker.Clear()
-		message("playback finished.")
 	}
 	return nil
 }
@@ -173,9 +175,9 @@ func resolveMediaType(path string) (MediaType, bool) {
 	lowerPath := strings.ToLower(path)
 	// TODO can play flac only
 	if strings.HasSuffix(lowerPath, ".flac") {
-		return Flac, true
+		return TypeFlac, true
 	}
-	return Unknown, false
+	return TypeUnknown, false
 }
 
 func selectFile(files []string) (string, error) {
@@ -194,18 +196,26 @@ func openFile(selected string) (*os.File, string, error) {
 	return f, selected, nil
 }
 
-func readTrackInfo(filePath string) error {
+func readTrackInfo(filePath string) (string, error) {
 	f, _, err := openFile(filePath)
 	if err != nil {
-		return fmt.Errorf("error opening file for tag reading: %w", err)
+		return "", fmt.Errorf("error opening file for tag reading: %w", err)
 	}
 	defer f.Close()
 
 	m, err := tag.ReadFrom(f)
 	if err != nil {
-		return nil
+		return "", nil
 	}
 
-	message("artist: %s, title: %s", m.Artist(), m.Title())
-	return nil
+	var trackInfoParts []string
+	artist := m.Artist()
+	if len(artist) > 0 {
+		trackInfoParts = append(trackInfoParts, artist)
+	}
+	title := m.Title()
+	if len(title) > 0 {
+		trackInfoParts = append(trackInfoParts, fmt.Sprintf("\"%s\"", title))
+	}
+	return strings.Join(trackInfoParts, " "), nil
 }
