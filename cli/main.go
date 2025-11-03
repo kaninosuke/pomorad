@@ -1,6 +1,6 @@
 package main
 
-import "pomorad/cmd"
+import "github.com/kaninosuke/pomorad/cli/cmd"
 
 func main() {
 	cmd.Execute()
