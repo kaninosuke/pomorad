@@ -1,4 +1,4 @@
-module pomorad
+module  github.com/kaninosuke/pomorad/cli
 
 go 1.25.2
 
