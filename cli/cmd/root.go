@@ -29,6 +29,10 @@ const (
 )
 const me = "pomorad"
 
+var cmdlineTimer int
+var cmdlineDir string
+var cmdlineTagArtist string
+
 // rootCmd represents the base command when called without any subcommands
 
 var rootCmd = &cobra.Command{
@@ -43,7 +47,7 @@ to quickly create a Cobra application.`,
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
 	Run: func(cmd *cobra.Command, args []string) {
-		message("started at %s", time.Now().Format(time.RFC3339))
+		message("[info] started at %s", time.Now().Format(time.RFC3339))
 
 		cfg, err := ini.Load("config.ini")
 		if err != nil {
@@ -51,18 +55,28 @@ to quickly create a Cobra application.`,
 			return
 		}
 		playbackTimer := "playback_timer"
-		playingSecond, err := cfg.Section("pomodoro").Key(playbackTimer).Int()
-		if err != nil {
-			fmt.Printf("Failed to parse '%s' as an integer from config: %v\n", playbackTimer, err)
-			return
+		var playbackSecond int
+		if cmdlineTimer > 0 {
+			playbackSecond = cmdlineTimer
+		} else {
+			playbackSecond, err = cfg.Section("pomodoro").Key(playbackTimer).Int()
+			if err != nil {
+				fmt.Printf("Failed to parse '%s' as an integer from config: %v\n", playbackTimer, err)
+				return
+			}
 		}
-		message("playback_timer : %d", playingSecond)
-		dirPath := cfg.Section("path").Key("music_dir").String()
-		if dirPath == "" {
-			fmt.Println("'music_dir' not found in [path] section of config.ini")
-			return
+		message("[config] %s : %d", playbackTimer, playbackSecond)
+		var dirPath string
+		if cmdlineDir != "" {
+			dirPath = cmdlineDir
+		} else {
+			dirPath = cfg.Section("path").Key("music_dir").String()
+			if dirPath == "" {
+				fmt.Println("'music_dir' not found in [path] section of config.ini")
+				return
+			}
 		}
-		message("music_dir : %q", dirPath)
+		message("[config] music_dir : %q", dirPath)
 
 		// recursive file search
 		var files []string
@@ -86,10 +100,22 @@ to quickly create a Cobra application.`,
 		}
 
 		var speakerInitialized bool
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(playingSecond)*time.Second)
+		// context to stop with timer.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(playbackSecond)*time.Second)
 		defer cancel()
-
+		// goroutine to stop by user.
+		go func() {
+			message("[info] to stop playing, press 's' & return")
+			var input string
+			for {
+				fmt.Scanln(&input)
+				if input == "s" || input == "S" {
+					message("[info] stopped by user")
+					cancel()
+					return
+				}
+			}
+		}()
 		// Loop until the context's timeout is reached.
 		for ctx.Err() == nil {
 			selectedFilePath, err := selectFile(files)
@@ -109,7 +135,7 @@ to quickly create a Cobra application.`,
 				continue
 			}
 
-			message("playing.. %s file:%q", trackInfo, selectedFile)
+			message("[♪] %s file:%q", trackInfo, selectedFile)
 			err = playTrack(ctx, f, &speakerInitialized)
 			f.Close() // Ensure file is closed after playing
 			if err != nil {
@@ -138,14 +164,20 @@ func init() {
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	// rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+
+	rootCmd.Flags().IntVarP(&cmdlineTimer, "timer", "t", 0, "playback_timer")
+	rootCmd.Flags().StringVarP(&cmdlineDir, "dir", "d", "", "music_dir")
+	rootCmd.Flags().StringVarP(&cmdlineTagArtist, "artist", "a", "", "tag:artist")
 }
 
+// custom print()
 func message(format string, a ...any) {
 	msg := fmt.Sprintf(format, a...)
 	fmt.Printf("[%s♪] %s\n", me, msg)
 }
 
+// controls player
 func playTrack(ctx context.Context, f *os.File, speakerInitialized *bool) error {
 	streamer, format, err := flac.Decode(f)
 	if err != nil {
@@ -171,15 +203,22 @@ func playTrack(ctx context.Context, f *os.File, speakerInitialized *bool) error 
 	return nil
 }
 
+// resolve type for beep.
 func resolveMediaType(path string) (MediaType, bool) {
 	lowerPath := strings.ToLower(path)
 	// TODO can play flac only
 	if strings.HasSuffix(lowerPath, ".flac") {
 		return TypeFlac, true
 	}
+	tagfliter(lowerPath)
 	return TypeUnknown, false
 }
 
+func tagfliter(lowerPath string) {
+	// TODO co-use with readTrackInfo?
+}
+
+// select randomly
 func selectFile(files []string) (string, error) {
 	if len(files) == 0 {
 		return "", fmt.Errorf("no files to select from")
@@ -188,6 +227,8 @@ func selectFile(files []string) (string, error) {
 	selected := files[randomIndex]
 	return selected, nil
 }
+
+// open file
 func openFile(selected string) (*os.File, string, error) {
 	f, err := os.Open(selected)
 	if err != nil {
@@ -196,6 +237,7 @@ func openFile(selected string) (*os.File, string, error) {
 	return f, selected, nil
 }
 
+// read tag
 func readTrackInfo(filePath string) (string, error) {
 	f, _, err := openFile(filePath)
 	if err != nil {
