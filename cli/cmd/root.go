@@ -19,6 +19,10 @@ import (
 )
 
 type MediaType int
+type FileInfo struct {
+	path string
+	tags tag.Metadata
+}
 
 const (
 	TypeUnknown MediaType = iota
@@ -29,9 +33,11 @@ const (
 )
 const me = "pomorad"
 
-var cmdlineTimer int
+var cmdlineTimer uint
 var cmdlineDir string
-var cmdlineTagArtist string
+
+// var cmdlineTagArtist string
+// var filterArtist string
 
 // rootCmd represents the base command when called without any subcommands
 
@@ -55,11 +61,11 @@ to quickly create a Cobra application.`,
 			return
 		}
 		playbackTimer := "playback_timer"
-		var playbackSecond int
+		var playbackSecond uint
 		if cmdlineTimer > 0 {
 			playbackSecond = cmdlineTimer
 		} else {
-			playbackSecond, err = cfg.Section("pomodoro").Key(playbackTimer).Int()
+			playbackSecond, err = cfg.Section("pomodoro").Key(playbackTimer).Uint()
 			if err != nil {
 				fmt.Printf("Failed to parse '%s' as an integer from config: %v\n", playbackTimer, err)
 				return
@@ -77,24 +83,41 @@ to quickly create a Cobra application.`,
 			}
 		}
 		message("[config] music_dir : %q", dirPath)
+		// TODO
+		// if cmdlineTagArtist != "" {
+		// 	filterArtist = cmdlineTagArtist
+		// } else {
+		// 	filterArtist = cfg.Section("tag_filter").Key("artist").String()
+		// }
+		// if len(filterArtist) > 0 {
+		// 	isTagFilterd = true
+		// 	message("[config] artist : %q", filterArtist)
+		// }
+		message("[info] to stop playing, press 's', return")
 
 		// recursive file search
-		var files []string
+		// var files []string
+		var fileInfos []FileInfo
 		err = filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				fmt.Printf("error reading at path %q: %v", path, err)
 				return err
 			}
-			_, isPlayable := resolveMediaType(path)
-			if !d.IsDir() && isPlayable {
-				files = append(files, path)
+			lowerPath := strings.ToLower(path)
+			isPlayable, fileInfo, err := getFileInfo(lowerPath, d)
+			if err != nil {
+				fmt.Printf("error reading at path %q: %v", path, err)
+				return err
+			}
+			if isPlayable {
+				fileInfos = append(fileInfos, fileInfo)
 			}
 			return nil
 		})
 		if err != nil {
 			fmt.Println("error reading files recursively: %w", err)
 		}
-		if len(files) == 0 {
+		if len(fileInfos) == 0 {
 			fmt.Println("error no file found: %w", err)
 			return
 		}
@@ -105,11 +128,10 @@ to quickly create a Cobra application.`,
 		defer cancel()
 		// goroutine to stop by user.
 		go func() {
-			message("[info] to stop playing, press 's' & return")
 			var input string
 			for {
 				fmt.Scanln(&input)
-				if input == "s" || input == "S" {
+				if strings.ToLower(input) == "s" {
 					message("[info] stopped by user")
 					cancel()
 					return
@@ -118,24 +140,29 @@ to quickly create a Cobra application.`,
 		}()
 		// Loop until the context's timeout is reached.
 		for ctx.Err() == nil {
-			selectedFilePath, err := selectFile(files)
+			selectedFileInfo, err := selectRandomFile(fileInfos)
 			if err != nil {
 				fmt.Printf("error selecting file: %v\n", err)
 				continue
 			}
 
-			trackInfo, err := readTrackInfo(selectedFilePath)
-			if err != nil {
-				fmt.Printf("error reading track info: %v\n", err)
-				continue
-			}
-			f, selectedFile, err := openFile(selectedFilePath)
+			f, selectedFile, err := openFile(selectedFileInfo.path)
 			if err != nil {
 				fmt.Printf("error opening file: %v\n", err)
 				continue
 			}
+			var tagInfo []string
+			artist := selectedFileInfo.tags.Artist()
+			if len(artist) != 0 {
+				tagInfo = append(tagInfo, artist)
+			}
+			title := selectedFileInfo.tags.Title()
+			if len(title) != 0 {
+				tagInfo = append(tagInfo, fmt.Sprintf("%q", title))
+			}
+			trackInfo := strings.Join(tagInfo, " ")
 
-			message("[♪] %s file:%q", trackInfo, selectedFile)
+			message("[♪] %s file: %q", trackInfo, selectedFile)
 			err = playTrack(ctx, f, &speakerInitialized)
 			f.Close() // Ensure file is closed after playing
 			if err != nil {
@@ -166,9 +193,10 @@ func init() {
 	// when this action is called directly.
 	// rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 
-	rootCmd.Flags().IntVarP(&cmdlineTimer, "timer", "t", 0, "playback_timer")
+	rootCmd.Flags().UintVarP(&cmdlineTimer, "timer", "t", 0, "playback_timer")
 	rootCmd.Flags().StringVarP(&cmdlineDir, "dir", "d", "", "music_dir")
-	rootCmd.Flags().StringVarP(&cmdlineTagArtist, "artist", "a", "", "tag:artist")
+	// TODO
+	// rootCmd.Flags().StringVarP(&cmdlineTagArtist, "artist", "a", "", "tag:artist")
 }
 
 // custom print()
@@ -203,29 +231,44 @@ func playTrack(ctx context.Context, f *os.File, speakerInitialized *bool) error 
 	return nil
 }
 
-// resolve type for beep.
-func resolveMediaType(path string) (MediaType, bool) {
-	lowerPath := strings.ToLower(path)
-	// TODO can play flac only
-	if strings.HasSuffix(lowerPath, ".flac") {
-		return TypeFlac, true
+func getFileInfo(lowerPath string, d fs.DirEntry) (bool, FileInfo, error) {
+	// pre-filter
+	if !filterPlayable(lowerPath, d) {
+		return false, FileInfo{}, nil
 	}
-	tagfliter(lowerPath)
-	return TypeUnknown, false
-}
+	// open and inspect
+	f, _, err := openFile(strings.ToLower(lowerPath))
+	if err != nil {
+		return false, FileInfo{}, fmt.Errorf("error opening file for tag reading: %w", err)
+	}
+	defer f.Close()
 
-func tagfliter(lowerPath string) {
-	// TODO co-use with readTrackInfo?
+	m, err := tag.ReadFrom(f)
+	if err != nil {
+		// no tag. when tag filtered, skip file
+		return true, FileInfo{lowerPath, nil}, nil
+	}
+
+	// return with media tag
+	return true, FileInfo{lowerPath, m}, nil
+}
+func filterPlayable(lowerPath string, d fs.DirEntry) bool {
+	isFile := !d.Type().IsDir()
+	mediaType := TypeUnknown
+	if strings.HasSuffix(lowerPath, ".flac") {
+		mediaType = TypeFlac
+	}
+	isPlayableMediaType := !(mediaType == TypeUnknown)
+	return isFile && isPlayableMediaType
 }
 
 // select randomly
-func selectFile(files []string) (string, error) {
-	if len(files) == 0 {
-		return "", fmt.Errorf("no files to select from")
+func selectRandomFile(fileInfos []FileInfo) (FileInfo, error) {
+	if len(fileInfos) == 0 {
+		return FileInfo{}, fmt.Errorf("no files to select from")
 	}
-	randomIndex := rand.IntN(len(files))
-	selected := files[randomIndex]
-	return selected, nil
+	randomIndex := rand.IntN(len(fileInfos))
+	return fileInfos[randomIndex], nil
 }
 
 // open file
@@ -235,29 +278,4 @@ func openFile(selected string) (*os.File, string, error) {
 		return nil, selected, fmt.Errorf("error opening file %s: %w", selected, err)
 	}
 	return f, selected, nil
-}
-
-// read tag
-func readTrackInfo(filePath string) (string, error) {
-	f, _, err := openFile(filePath)
-	if err != nil {
-		return "", fmt.Errorf("error opening file for tag reading: %w", err)
-	}
-	defer f.Close()
-
-	m, err := tag.ReadFrom(f)
-	if err != nil {
-		return "", nil
-	}
-
-	var trackInfoParts []string
-	artist := m.Artist()
-	if len(artist) > 0 {
-		trackInfoParts = append(trackInfoParts, artist)
-	}
-	title := m.Title()
-	if len(title) > 0 {
-		trackInfoParts = append(trackInfoParts, fmt.Sprintf("\"%s\"", title))
-	}
-	return strings.Join(trackInfoParts, " "), nil
 }
